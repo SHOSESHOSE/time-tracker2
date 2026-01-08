@@ -341,41 +341,59 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ------- ログ操作 -------
 
-  function startCategory(category) {
-    if (isSwitchingTask) return;
-    isSwitchingTask = true;
+function startCategory(category) {
+  if (isSwitchingTask) return;
+  isSwitchingTask = true;
 
-    const todayYMD = toYMD(new Date());
-    const selectedYMD = toYMD(selectedDate);
+  const todayYMD = toYMD(new Date());
+  const selectedYMD = toYMD(selectedDate);
 
-    if (selectedYMD !== todayYMD) {
-      alert("開始は今日の日付でのみ可能です（過去日は「＋手入力追加」で入力してください）");
-      isSwitchingTask = false;
-      return;
-    }
-
-    // ★重要：currentTaskがnullでも、localStorage上の進行中を止める
-    stopCurrent();
-
-    const now = new Date();
-    const newLog = {
-      id: cryptoRandomId(),
-      date: todayYMD,
-      category,
-      startISO: now.toISOString(),
-      endISO: null,
-    };
-
-    const logs = loadLogs();
-    logs.push(newLog);
-    saveLogs(logs);
-
-    currentTask = newLog;
-
-    setTimeout(() => {
-      isSwitchingTask = false;
-    }, 120);
+  if (selectedYMD !== todayYMD) {
+    alert("開始は今日の日付でのみ可能です（過去日は「＋手入力追加」で入力してください）");
+    isSwitchingTask = false;
+    return;
   }
+
+  // ★最重要：進行中が何件あっても全部止める（=1件ルール強制）
+  closeAllRunningLogs();
+
+  const now = new Date();
+  const newLog = {
+    id: cryptoRandomId(),
+    date: todayYMD,
+    category,
+    startISO: now.toISOString(),
+    endISO: null,
+  };
+
+  const logs = loadLogs();
+  logs.push(newLog);
+  saveLogs(logs);
+
+  currentTask = newLog;
+
+  setTimeout(() => {
+    isSwitchingTask = false;
+  }, 200);
+}
+
+function closeAllRunningLogs() {
+  const logs = loadLogs();
+  const nowISO = new Date().toISOString();
+  let changed = false;
+
+  for (const log of logs) {
+    if (!log.endISO) {
+      log.endISO = nowISO;
+      changed = true;
+    }
+  }
+
+  if (changed) saveLogs(logs);
+  currentTask = null;
+}
+
+
 
   // ★重要：currentTaskが無くても「進行中ログ」を止める
   function stopCurrent() {
