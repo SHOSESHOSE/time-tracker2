@@ -374,8 +374,25 @@ function startCategory(category) {
 
   setTimeout(() => {
     isSwitchingTask = false;
-  }, 200);
+  }, 250);
 }
+
+function closeAllRunningLogs() {
+  const logs = loadLogs();
+  const nowISO = new Date().toISOString();
+  let changed = false;
+
+  for (const log of logs) {
+    if (!log.endISO) {
+      log.endISO = nowISO;
+      changed = true;
+    }
+  }
+
+  if (changed) saveLogs(logs);
+  currentTask = null;
+}
+
 
 function closeAllRunningLogs() {
   const logs = loadLogs();
