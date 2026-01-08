@@ -8,7 +8,7 @@ window.addEventListener("unhandledrejection", (e) => {
 const LS_KEY = "timeTracker.logs";
 const USER_KEY = "timeTrackerUserName";
 
-let currentTask = null;          // 稼働中ログ
+let currentTask = null;          // 稼働中ログ（メモリ）
 let selectedDate = new Date();   // 表示中日付
 let editingLogId = null;         // 編集対象のログID（新規追加はnull）
 let creatingDateYMD = null;      // 新規追加対象日（YYYY-MM-DD）
@@ -91,6 +91,9 @@ document.addEventListener("DOMContentLoaded", () => {
   dateInput.value = toYMD(new Date());
   selectedDate = fromYMD(dateInput.value);
 
+  // ★起動時：進行中ログを復元（＆重複があれば整理）
+  reconcileRunningTasksOnBoot();
+
   // 日付変更
   dateInput.addEventListener("change", () => {
     selectedDate = fromYMD(dateInput.value);
@@ -122,7 +125,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // 停止
   stopBtn?.addEventListener("pointerup", (e) => {
     e.preventDefault();
-    stopCurrent();
+    stopCurrent(); // currentTaskがnullでも止める
     renderAll();
   });
 
@@ -209,6 +212,7 @@ document.addEventListener("DOMContentLoaded", () => {
     logs[idx].startISO = startISO;
     logs[idx].endISO = endISO;
 
+    // 稼働中ログを編集して endISO を埋めたら currentTask を外す
     if (currentTask && currentTask.id === editingLogId && logs[idx].endISO) {
       currentTask = null;
     }
@@ -250,13 +254,19 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function renderStatus() {
+    // 起動後に「進行中ログがあるのに currentTask がnull」になっても復元する
+    if (!currentTask) {
+      const running = getLatestRunningLog();
+      if (running) currentTask = running;
+    }
+
     if (!currentTask) {
       statusText.textContent = "停止中";
       return;
     }
+
     const start = new Date(currentTask.startISO);
-    statusText.textContent =
-      `作業中：${currentTask.category}（開始 ${start.toLocaleTimeString()}）`;
+    statusText.textContent = `作業中：${currentTask.category}（開始 ${start.toLocaleTimeString()}）`;
   }
 
   function renderLogs() {
@@ -331,9 +341,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ------- ログ操作 -------
 
-  // ★ここが「進行中が残る」対策の本体：ロック + 強制stop
   function startCategory(category) {
-    if (isSwitchingTask) return; // 多重防止
+    if (isSwitchingTask) return;
     isSwitchingTask = true;
 
     const todayYMD = toYMD(new Date());
@@ -345,10 +354,8 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // どんな場合でも先に停止（ズレ防止）
-    if (currentTask) {
-      stopCurrent();
-    }
+    // ★重要：currentTaskがnullでも、localStorage上の進行中を止める
+    stopCurrent();
 
     const now = new Date();
     const newLog = {
@@ -365,22 +372,76 @@ document.addEventListener("DOMContentLoaded", () => {
 
     currentTask = newLog;
 
-    // 少し待って解除（連打・誤タップ耐性）
     setTimeout(() => {
       isSwitchingTask = false;
     }, 120);
   }
 
+  // ★重要：currentTaskが無くても「進行中ログ」を止める
   function stopCurrent() {
-    if (!currentTask) return;
-
     const logs = loadLogs();
-    const idx = logs.findIndex((x) => x.id === currentTask.id);
-    if (idx !== -1) {
+
+    // currentTask優先。無ければ、最後の進行中ログを止める
+    const targetId = currentTask?.id || getLatestRunningLogId(logs);
+    if (!targetId) {
+      currentTask = null;
+      return;
+    }
+
+    const idx = logs.findIndex((x) => x.id === targetId);
+    if (idx !== -1 && !logs[idx].endISO) {
       logs[idx].endISO = new Date().toISOString();
       saveLogs(logs);
     }
-    currentTask = null;
+
+    if (currentTask && currentTask.id === targetId) {
+      currentTask = null;
+    } else {
+      // どれを止めたかに関わらず、再度復元し直す
+      currentTask = null;
+    }
+  }
+
+  // ------- 起動時：進行中の復元＆重複整理 -------
+
+  function reconcileRunningTasksOnBoot() {
+    const logs = loadLogs();
+    const running = logs.filter(l => !l.endISO);
+
+    if (running.length === 0) {
+      currentTask = null;
+      return;
+    }
+
+    // startISOが新しいものを「最後の進行中」とみなす
+    running.sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+    const latest = running[running.length - 1];
+
+    // ★重複があるなら、古い進行中は「今」で強制終了
+    if (running.length >= 2) {
+      const nowISO = new Date().toISOString();
+      for (let i = 0; i < running.length - 1; i++) {
+        const id = running[i].id;
+        const idx = logs.findIndex(x => x.id === id);
+        if (idx !== -1 && !logs[idx].endISO) logs[idx].endISO = nowISO;
+      }
+      saveLogs(logs);
+    }
+
+    currentTask = latest;
+  }
+
+  function getLatestRunningLog() {
+    const logs = loadLogs();
+    const id = getLatestRunningLogId(logs);
+    return id ? logs.find(x => x.id === id) : null;
+  }
+
+  function getLatestRunningLogId(logs) {
+    const running = logs.filter(l => !l.endISO);
+    if (running.length === 0) return null;
+    running.sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
+    return running[running.length - 1].id;
   }
 
   // ------- モーダル -------
@@ -488,8 +549,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function downloadCsv(csvText, fileName) {
-    // Excel文字化け対策：UTF-8 BOM
-    const bom = "\uFEFF";
+    const bom = "\uFEFF"; // Excel文字化け対策
     const blob = new Blob([bom + csvText], { type: "text/csv;charset=utf-8;" });
 
     const url = URL.createObjectURL(blob);
