@@ -113,14 +113,15 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // カテゴリボタン：タイマー開始（今日のみ）
-  categoryButtons.forEach((btn) => {
-    btn.addEventListener("pointerup", (e) => {
-      e.preventDefault();
-      const cat = btn.dataset.category;
-      startCategory(cat);
-      renderAll();
-    });
-  });
+categoryButtons.forEach((btn) => {
+  btn.onpointerup = (e) => {
+    e.preventDefault();
+    const cat = btn.dataset.category;
+    startCategory(cat);
+    renderAll();
+  };
+});
+
 
   // 停止
   stopBtn?.addEventListener("pointerup", (e) => {
