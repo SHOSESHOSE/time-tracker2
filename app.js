@@ -12,8 +12,16 @@ let currentTask = null;          // 稼働中ログ
 let selectedDate = new Date();   // 表示中日付
 let editingLogId = null;         // 編集対象のログID（新規追加はnull）
 let creatingDateYMD = null;      // 新規追加対象日（YYYY-MM-DD）
+let isSwitchingTask = false;     // ★カテゴリ切替の多重操作ロック
 
 document.addEventListener("DOMContentLoaded", () => {
+  // ===== Service Worker 登録（PWA用）=====
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./service-worker.js").catch(console.error);
+    });
+  }
+
   // 要素取得
   const dateInput = document.getElementById("dateInput");
   const prevDayBtn = document.getElementById("prevDay");
@@ -323,16 +331,24 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ------- ログ操作 -------
 
+  // ★ここが「進行中が残る」対策の本体：ロック + 強制stop
   function startCategory(category) {
+    if (isSwitchingTask) return; // 多重防止
+    isSwitchingTask = true;
+
     const todayYMD = toYMD(new Date());
     const selectedYMD = toYMD(selectedDate);
 
     if (selectedYMD !== todayYMD) {
       alert("開始は今日の日付でのみ可能です（過去日は「＋手入力追加」で入力してください）");
+      isSwitchingTask = false;
       return;
     }
 
-    if (currentTask) stopCurrent();
+    // どんな場合でも先に停止（ズレ防止）
+    if (currentTask) {
+      stopCurrent();
+    }
 
     const now = new Date();
     const newLog = {
@@ -348,6 +364,11 @@ document.addEventListener("DOMContentLoaded", () => {
     saveLogs(logs);
 
     currentTask = newLog;
+
+    // 少し待って解除（連打・誤タップ耐性）
+    setTimeout(() => {
+      isSwitchingTask = false;
+    }, 120);
   }
 
   function stopCurrent() {
