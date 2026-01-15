@@ -81,6 +81,13 @@
         <input type="time" id="editEndTime">
       </div>
 
+      <div class="form-group">
+        <label>備考（現場名・案件名など）</label>
+        <input type="text" id="editNote" list="noteSuggestions" placeholder="例：〇〇様邸  など">
+        <datalist id="noteSuggestions"></datalist>
+      </div>
+
+
       <div class="modal-actions">
         <button id="saveEdit" class="btn-primary" type="button">保存</button>
         <button id="deleteLog" class="btn-danger" type="button">削除</button>
