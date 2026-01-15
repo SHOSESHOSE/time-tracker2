@@ -8,21 +8,21 @@ window.addEventListener("unhandledrejection", (e) => {
 const LS_KEY = "timeTracker.logs";
 const USER_KEY = "timeTrackerUserName";
 
-let currentTask = null;          // 稼働中ログ（メモリ）
-let selectedDate = new Date();   // 表示中日付
-let editingLogId = null;         // 編集対象のログID（新規追加はnull）
-let creatingDateYMD = null;      // 新規追加対象日（YYYY-MM-DD）
-let isSwitchingTask = false;     // ★カテゴリ切替の多重操作ロック
+let currentTask = null;          // { id, date, category, startISO, endISO, note }
+let selectedDate = new Date();   // Date
+let editingLogId = null;         // nullなら新規追加
+let creatingDateYMD = null;      // 新規追加対象日
+let isSwitchingTask = false;     // 多重操作ロック
 
 document.addEventListener("DOMContentLoaded", () => {
-  // ===== Service Worker 登録（PWA用）=====
+  // ===== Service Worker（PWA用：あってもなくてもOK）=====
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register("./service-worker.js").catch(console.error);
+      navigator.serviceWorker.register("./service-worker.js").catch(() => {});
     });
   }
 
-  // 要素取得
+  // ===== 要素取得 =====
   const dateInput = document.getElementById("dateInput");
   const prevDayBtn = document.getElementById("prevDay");
   const nextDayBtn = document.getElementById("nextDay");
@@ -36,27 +36,30 @@ document.addEventListener("DOMContentLoaded", () => {
   const logsList = document.getElementById("logsList");
   const summary = document.getElementById("summary");
 
-  // CSV出力ボタン
-  const exportBtn = document.getElementById("exportCsv");            // 日次
-  const exportMonthBtn = document.getElementById("exportCsvMonth");  // 月次
-  const addLogBtn = document.getElementById("addLogBtn");            // 手入力追加
+  const exportBtn = document.getElementById("exportCsv");               // 日次CSV
+  const exportMonthBtn = document.getElementById("exportCsvMonth");     // 月次CSV（無くてもOK）
+  const addLogBtn = document.getElementById("addLogBtn");               // 手入力追加（無くてもOK）
 
-  // ユーザー名UI
   const userNameLabel = document.getElementById("userNameLabel");
   const changeUserBtn = document.getElementById("changeUserBtn");
 
-  // モーダル要素
   const editModal = document.getElementById("editModal");
   const editCategory = document.getElementById("editCategory");
   const editStartTime = document.getElementById("editStartTime");
   const editEndTime = document.getElementById("editEndTime");
+  const editNote = document.getElementById("editNote");                // ★備考
+  const noteSuggestions = document.getElementById("noteSuggestions");  // ★候補
   const saveEdit = document.getElementById("saveEdit");
   const deleteLog = document.getElementById("deleteLog");
   const cancelEdit = document.getElementById("cancelEdit");
 
-  // 安全チェック
-  if (!dateInput || !statusText || !logsList || !summary || !editModal) {
+  // ===== 最低限の存在チェック =====
+  if (!dateInput || !statusText || !logsList || !summary || !editModal || !editCategory || !editStartTime || !editEndTime) {
     alert("HTML要素が見つかりません（idの不一致の可能性）");
+    return;
+  }
+  if (!editNote || !noteSuggestions) {
+    alert("備考欄（editNote / noteSuggestions）が見つかりません。index.htmlに追加してください。");
     return;
   }
 
@@ -80,100 +83,152 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   updateUserNameUI();
 
-  changeUserBtn?.addEventListener("pointerup", (e) => {
-    e.preventDefault();
-    const current = getUserName();
-    const input = prompt("名前を変更してください", current);
-    if (input !== null) setUserName(input);
-  });
+  if (changeUserBtn) {
+    changeUserBtn.onpointerup = (e) => {
+      e.preventDefault();
+      const current = getUserName();
+      const input = prompt("名前を変更してください", current);
+      if (input !== null) setUserName(input);
+    };
+  }
 
-  // 初期：今日
+  // ===== 日付初期化 =====
   dateInput.value = toYMD(new Date());
   selectedDate = fromYMD(dateInput.value);
 
-  // ★起動時：進行中ログを復元（＆重複があれば整理）
-  reconcileRunningTasksOnBoot();
+  // 起動時：もし進行中ログが複数あれば最新だけ残す（壊れたデータ掃除）
+  enforceSingleRunningLog();
 
-  // 日付変更
-  dateInput.addEventListener("change", () => {
+  // ===== イベント（上書き方式：二重登録対策）=====
+  dateInput.onchange = () => {
     selectedDate = fromYMD(dateInput.value);
     renderAll();
-  });
-  prevDayBtn?.addEventListener("pointerup", (e) => {
-    e.preventDefault();
-    selectedDate = addDays(selectedDate, -1);
-    dateInput.value = toYMD(selectedDate);
-    renderAll();
-  });
-  nextDayBtn?.addEventListener("pointerup", (e) => {
-    e.preventDefault();
-    selectedDate = addDays(selectedDate, +1);
-    dateInput.value = toYMD(selectedDate);
-    renderAll();
-  });
-
-  // カテゴリボタン：タイマー開始（今日のみ）
-categoryButtons.forEach((btn) => {
-  btn.onpointerup = (e) => {
-    e.preventDefault();
-    const cat = btn.dataset.category;
-    startCategory(cat);
-    renderAll();
   };
-});
 
+  if (prevDayBtn) {
+    prevDayBtn.onpointerup = (e) => {
+      e.preventDefault();
+      selectedDate = addDays(selectedDate, -1);
+      dateInput.value = toYMD(selectedDate);
+      renderAll();
+    };
+  }
+
+  if (nextDayBtn) {
+    nextDayBtn.onpointerup = (e) => {
+      e.preventDefault();
+      selectedDate = addDays(selectedDate, +1);
+      dateInput.value = toYMD(selectedDate);
+      renderAll();
+    };
+  }
+
+  // カテゴリ開始
+  categoryButtons.forEach((btn) => {
+    btn.onpointerup = (e) => {
+      e.preventDefault();
+      startCategory(btn.dataset.category);
+      renderAll();
+    };
+  });
 
   // 停止
-  stopBtn?.addEventListener("pointerup", (e) => {
-    e.preventDefault();
-    stopCurrent(); // currentTaskがnullでも止める
-    renderAll();
-  });
+  if (stopBtn) {
+    stopBtn.onpointerup = (e) => {
+      e.preventDefault();
+      stopCurrent();
+      renderAll();
+    };
+  }
 
   // 日次CSV
-  exportBtn?.addEventListener("pointerup", (e) => {
-    e.preventDefault();
-    exportCsvForSelectedDate();
-  });
+  if (exportBtn) {
+    exportBtn.onpointerup = (e) => {
+      e.preventDefault();
+      exportCsvForSelectedDate();
+    };
+  }
 
-  // 月次CSV
-  exportMonthBtn?.addEventListener("pointerup", (e) => {
-    e.preventDefault();
-    exportCsvForSelectedMonth();
-  });
+  // 月次CSV（ボタンがある人だけ）
+  if (exportMonthBtn) {
+    exportMonthBtn.onpointerup = (e) => {
+      e.preventDefault();
+      exportCsvForSelectedMonth();
+    };
+  }
 
-  // 手入力追加
-  addLogBtn?.addEventListener("pointerup", (e) => {
-    e.preventDefault();
-    openCreateModalForSelectedDate();
-  });
+  // 手入力追加（ボタンがある人だけ）
+  if (addLogBtn) {
+    addLogBtn.onpointerup = (e) => {
+      e.preventDefault();
+      openCreateModalForSelectedDate();
+    };
+  }
 
-  // モーダル操作
-  cancelEdit?.addEventListener("pointerup", (e) => {
-    e.preventDefault();
-    closeModal();
-  });
-  editModal?.addEventListener("pointerup", (e) => {
+  // モーダル：背景タップで閉じる
+  editModal.onpointerup = (e) => {
     if (e.target === editModal) closeModal();
-  });
+  };
+
+  if (cancelEdit) {
+    cancelEdit.onpointerup = (e) => {
+      e.preventDefault();
+      closeModal();
+    };
+  }
+
+  // カテゴリ変更で候補切替
+  editCategory.onchange = () => {
+    renderNoteSuggestions({ onlyGenba: editCategory.value === "現場" });
+  };
 
   // 保存（編集 or 新規追加）
-  saveEdit?.addEventListener("pointerup", (e) => {
-    e.preventDefault();
+  if (saveEdit) {
+    saveEdit.onpointerup = (e) => {
+      e.preventDefault();
 
-    const logs = loadLogs();
-    const category = editCategory.value;
-    const s = editStartTime.value;
-    const en = editEndTime.value;
+      const logs = loadLogs();
+      const category = editCategory.value;
+      const s = editStartTime.value;
+      const en = editEndTime.value;
+      const note = String(editNote.value || "").trim();
 
-    if (!s) {
-      alert("開始時刻が空です");
-      return;
-    }
+      if (!s) {
+        alert("開始時刻が空です");
+        return;
+      }
 
-    // 新規追加モード
-    if (!editingLogId) {
-      const d = creatingDateYMD || toYMD(selectedDate);
+      // 新規追加モード
+      if (!editingLogId) {
+        const d = creatingDateYMD || toYMD(selectedDate);
+        const startISO = toISO(d, s);
+        const endISO = en ? toISO(d, en) : null;
+
+        if (endISO && new Date(endISO) < new Date(startISO)) {
+          alert("終了時刻が開始時刻より前です");
+          return;
+        }
+
+        logs.push({
+          id: cryptoRandomId(),
+          date: d,
+          category,
+          startISO,
+          endISO,
+          note, // ★備考
+        });
+
+        saveLogs(logs);
+        closeModal();
+        renderAll();
+        return;
+      }
+
+      // 編集モード
+      const idx = logs.findIndex((x) => x.id === editingLogId);
+      if (idx === -1) return;
+
+      const d = logs[idx].date;
       const startISO = toISO(d, s);
       const endISO = en ? toISO(d, en) : null;
 
@@ -182,90 +237,154 @@ categoryButtons.forEach((btn) => {
         return;
       }
 
-      logs.push({
-        id: cryptoRandomId(),
-        date: d,
-        category,
-        startISO,
-        endISO,
-      });
+      logs[idx].category = category;
+      logs[idx].startISO = startISO;
+      logs[idx].endISO = endISO;
+      logs[idx].note = note; // ★備考
+
+      // 進行中を編集で終了させたら currentTask を解除
+      if (currentTask && currentTask.id === editingLogId && logs[idx].endISO) {
+        currentTask = null;
+      }
 
       saveLogs(logs);
       closeModal();
       renderAll();
-      return;
-    }
+    };
+  }
 
-    // 編集モード
-    const idx = logs.findIndex((x) => x.id === editingLogId);
-    if (idx === -1) return;
+  // 削除
+  if (deleteLog) {
+    deleteLog.onpointerup = (e) => {
+      e.preventDefault();
+      if (!editingLogId) {
+        alert("新規追加中は削除できません。キャンセルしてください。");
+        return;
+      }
 
-    const d = logs[idx].date;
-    const startISO = toISO(d, s);
-    const endISO = en ? toISO(d, en) : null;
+      let logs = loadLogs();
+      logs = logs.filter((x) => x.id !== editingLogId);
 
-    if (endISO && new Date(endISO) < new Date(startISO)) {
-      alert("終了時刻が開始時刻より前です");
-      return;
-    }
+      if (currentTask && currentTask.id === editingLogId) {
+        currentTask = null;
+      }
 
-    logs[idx].category = category;
-    logs[idx].startISO = startISO;
-    logs[idx].endISO = endISO;
+      saveLogs(logs);
+      closeModal();
+      renderAll();
+    };
+  }
 
-    // 稼働中ログを編集して endISO を埋めたら currentTask を外す
-    if (currentTask && currentTask.id === editingLogId && logs[idx].endISO) {
-      currentTask = null;
-    }
-
-    saveLogs(logs);
-    closeModal();
-    renderAll();
-  });
-
-  // 削除（編集時のみ）
-  deleteLog?.addEventListener("pointerup", (e) => {
-    e.preventDefault();
-    if (!editingLogId) {
-      alert("新規追加中のため削除はできません。キャンセルしてください。");
-      return;
-    }
-
-    let logs = loadLogs();
-    logs = logs.filter((x) => x.id !== editingLogId);
-
-    if (currentTask && currentTask.id === editingLogId) {
-      currentTask = null;
-    }
-
-    saveLogs(logs);
-    closeModal();
-    renderAll();
-  });
-
-  // 初回
+  // ===== 初回レンダリング =====
   renderAll();
 
-  // ------- 表示 -------
+  // ============================
+  // 主要ロジック
+  // ============================
 
   function renderAll() {
+    // 進行中が複数になってしまったデータを毎回整える（Web版の事故対策）
+    enforceSingleRunningLog();
+
     renderStatus();
     renderLogs();
     renderSummary();
   }
 
-  function renderStatus() {
-    // 起動後に「進行中ログがあるのに currentTask がnull」になっても復元する
-    if (!currentTask) {
-      const running = getLatestRunningLog();
-      if (running) currentTask = running;
+  function startCategory(category) {
+    if (isSwitchingTask) return;
+    isSwitchingTask = true;
+
+    const todayYMD = toYMD(new Date());
+    const selectedYMD = toYMD(selectedDate);
+
+    if (selectedYMD !== todayYMD) {
+      alert("開始は今日の日付でのみ可能です（過去日は「＋手入力追加」で入力してください）");
+      isSwitchingTask = false;
+      return;
     }
 
+    // まず既存の進行中を止める（currentTaskに依存しない）
+    closeAllRunningLogs();
+
+    const now = new Date();
+    const newLog = {
+      id: cryptoRandomId(),
+      date: todayYMD,
+      category,
+      startISO: now.toISOString(),
+      endISO: null,
+      note: "", // ★備考
+    };
+
+    const logs = loadLogs();
+    logs.push(newLog);
+    saveLogs(logs);
+
+    currentTask = newLog;
+
+    setTimeout(() => {
+      isSwitchingTask = false;
+    }, 250);
+  }
+
+  function stopCurrent() {
+    // currentTaskがnullでも「進行中」を止める
+    closeAllRunningLogs();
+    currentTask = null;
+  }
+
+  function closeAllRunningLogs() {
+    const logs = loadLogs();
+    const nowISO = new Date().toISOString();
+    let changed = false;
+
+    for (const log of logs) {
+      if (!log.endISO) {
+        log.endISO = nowISO;
+        changed = true;
+      }
+    }
+
+    if (changed) saveLogs(logs);
+  }
+
+  function enforceSingleRunningLog() {
+    const logs = loadLogs();
+    const runningIdx = [];
+    for (let i = 0; i < logs.length; i++) {
+      if (!logs[i].endISO) runningIdx.push(i);
+    }
+    if (runningIdx.length === 0) {
+      currentTask = null;
+      return;
+    }
+    if (runningIdx.length === 1) {
+      currentTask = logs[runningIdx[0]];
+      return;
+    }
+
+    // startISOが新しいものを残す
+    runningIdx.sort((a, b) => new Date(logs[a].startISO) - new Date(logs[b].startISO));
+    const keepIdx = runningIdx[runningIdx.length - 1];
+
+    const nowISO = new Date().toISOString();
+    for (const idx of runningIdx) {
+      if (idx !== keepIdx) logs[idx].endISO = nowISO;
+    }
+    saveLogs(logs);
+    currentTask = logs[keepIdx];
+  }
+
+  // ============================
+  // 表示
+  // ============================
+
+  function renderStatus() {
     if (!currentTask) {
       statusText.textContent = "停止中";
       return;
     }
-
     const start = new Date(currentTask.startISO);
     statusText.textContent = `作業中：${currentTask.category}（開始 ${start.toLocaleTimeString()}）`;
   }
@@ -285,6 +404,7 @@ categoryButtons.forEach((btn) => {
       const s = new Date(log.startISO);
       const e = log.endISO ? new Date(log.endISO) : null;
       const mins = calcMinutes(log.startISO, log.endISO);
+      const note = String(log.note || "").trim();
 
       const row = document.createElement("div");
       row.className = "log-item";
@@ -297,19 +417,21 @@ categoryButtons.forEach((btn) => {
       row.innerHTML = `
         <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;">
           <div>
-            <div style="font-weight:700;">${log.category}</div>
+            <div style="font-weight:700;">${escapeHtml(log.category)}</div>
             <div style="opacity:.75;font-size:12px;">
               ${fmtHM(s)} → ${e ? fmtHM(e) : "（進行中）"} / ${mins}分
             </div>
+            ${note ? `<div style="opacity:.7;font-size:12px;margin-top:4px;">📝 ${escapeHtml(note)}</div>` : ""}
           </div>
           <button type="button" style="padding:8px 10px;border-radius:10px;border:0;cursor:pointer;">編集</button>
         </div>
       `;
 
-      row.querySelector("button").addEventListener("pointerup", (e) => {
-        e.preventDefault();
+      const editBtn = row.querySelector("button");
+      editBtn.onpointerup = (ev) => {
+        ev.preventDefault();
         openEditModal(log);
-      });
+      };
 
       logsList.appendChild(row);
     });
@@ -323,7 +445,8 @@ categoryButtons.forEach((btn) => {
     const sums = Object.fromEntries(order.map((k) => [k, 0]));
 
     logs.forEach((log) => {
-      sums[log.category] = (sums[log.category] || 0) + calcMinutes(log.startISO, log.endISO);
+      const cat = log.category;
+      sums[cat] = (sums[cat] || 0) + calcMinutes(log.startISO, log.endISO);
     });
 
     const total = order.reduce((acc, k) => acc + (sums[k] || 0), 0);
@@ -331,7 +454,7 @@ categoryButtons.forEach((btn) => {
     summary.innerHTML = `
       <h2 style="margin:10px 0 6px;">今日の合計</h2>
       ${order.map(k => `<div style="display:flex;justify-content:space-between;">
-        <div>${k}</div><div>${fmtHMFromMinutes(sums[k] || 0)}</div>
+        <div>${escapeHtml(k)}</div><div>${fmtHMFromMinutes(sums[k] || 0)}</div>
       </div>`).join("")}
       <hr style="opacity:.2;margin:8px 0;">
       <div style="display:flex;justify-content:space-between;font-weight:700;">
@@ -340,151 +463,13 @@ categoryButtons.forEach((btn) => {
     `;
   }
 
-  // ------- ログ操作 -------
-
-function startCategory(category) {
-  if (isSwitchingTask) return;
-  isSwitchingTask = true;
-
-  const todayYMD = toYMD(new Date());
-  const selectedYMD = toYMD(selectedDate);
-
-  if (selectedYMD !== todayYMD) {
-    alert("開始は今日の日付でのみ可能です（過去日は「＋手入力追加」で入力してください）");
-    isSwitchingTask = false;
-    return;
-  }
-
-  // ★最重要：進行中が何件あっても全部止める（=1件ルール強制）
-  closeAllRunningLogs();
-
-  const now = new Date();
-  const newLog = {
-    id: cryptoRandomId(),
-    date: todayYMD,
-    category,
-    startISO: now.toISOString(),
-    endISO: null,
-  };
-
-  const logs = loadLogs();
-  logs.push(newLog);
-  saveLogs(logs);
-
-  currentTask = newLog;
-
-  setTimeout(() => {
-    isSwitchingTask = false;
-  }, 250);
-}
-
-function closeAllRunningLogs() {
-  const logs = loadLogs();
-  const nowISO = new Date().toISOString();
-  let changed = false;
-
-  for (const log of logs) {
-    if (!log.endISO) {
-      log.endISO = nowISO;
-      changed = true;
-    }
-  }
-
-  if (changed) saveLogs(logs);
-  currentTask = null;
-}
-
-
-function closeAllRunningLogs() {
-  const logs = loadLogs();
-  const nowISO = new Date().toISOString();
-  let changed = false;
-
-  for (const log of logs) {
-    if (!log.endISO) {
-      log.endISO = nowISO;
-      changed = true;
-    }
-  }
-
-  if (changed) saveLogs(logs);
-  currentTask = null;
-}
-
-
-
-  // ★重要：currentTaskが無くても「進行中ログ」を止める
-  function stopCurrent() {
-    const logs = loadLogs();
-
-    // currentTask優先。無ければ、最後の進行中ログを止める
-    const targetId = currentTask?.id || getLatestRunningLogId(logs);
-    if (!targetId) {
-      currentTask = null;
-      return;
-    }
-
-    const idx = logs.findIndex((x) => x.id === targetId);
-    if (idx !== -1 && !logs[idx].endISO) {
-      logs[idx].endISO = new Date().toISOString();
-      saveLogs(logs);
-    }
-
-    if (currentTask && currentTask.id === targetId) {
-      currentTask = null;
-    } else {
-      // どれを止めたかに関わらず、再度復元し直す
-      currentTask = null;
-    }
-  }
-
-  // ------- 起動時：進行中の復元＆重複整理 -------
-
-  function reconcileRunningTasksOnBoot() {
-    const logs = loadLogs();
-    const running = logs.filter(l => !l.endISO);
-
-    if (running.length === 0) {
-      currentTask = null;
-      return;
-    }
-
-    // startISOが新しいものを「最後の進行中」とみなす
-    running.sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
-    const latest = running[running.length - 1];
-
-    // ★重複があるなら、古い進行中は「今」で強制終了
-    if (running.length >= 2) {
-      const nowISO = new Date().toISOString();
-      for (let i = 0; i < running.length - 1; i++) {
-        const id = running[i].id;
-        const idx = logs.findIndex(x => x.id === id);
-        if (idx !== -1 && !logs[idx].endISO) logs[idx].endISO = nowISO;
-      }
-      saveLogs(logs);
-    }
-
-    currentTask = latest;
-  }
-
-  function getLatestRunningLog() {
-    const logs = loadLogs();
-    const id = getLatestRunningLogId(logs);
-    return id ? logs.find(x => x.id === id) : null;
-  }
-
-  function getLatestRunningLogId(logs) {
-    const running = logs.filter(l => !l.endISO);
-    if (running.length === 0) return null;
-    running.sort((a, b) => new Date(a.startISO) - new Date(b.startISO));
-    return running[running.length - 1].id;
-  }
-
-  // ------- モーダル -------
+  // ============================
+  // モーダル
+  // ============================
 
   function openEditModal(log) {
-    creatingDateYMD = null;
     editingLogId = log.id;
+    creatingDateYMD = null;
 
     editCategory.value = log.category;
 
@@ -498,7 +483,16 @@ function closeAllRunningLogs() {
       editEndTime.value = "";
     }
 
+    editNote.value = log.note || "";
+
+    // 候補更新：現場なら現場候補を優先
+    renderNoteSuggestions({ onlyGenba: log.category === "現場" });
+
     editModal.style.display = "block";
+
+    if (log.category === "現場") {
+      setTimeout(() => editNote.focus(), 50);
+    }
   }
 
   function openCreateModalForSelectedDate() {
@@ -508,6 +502,9 @@ function closeAllRunningLogs() {
     editCategory.value = "事務";
     editStartTime.value = "09:00";
     editEndTime.value = "10:00";
+    editNote.value = "";
+
+    renderNoteSuggestions({ onlyGenba: true });
 
     editModal.style.display = "block";
   }
@@ -518,7 +515,45 @@ function closeAllRunningLogs() {
     editModal.style.display = "none";
   }
 
-  // ------- CSV -------
+  // ============================
+  // 備考候補（datalist）
+  // ============================
+
+  function buildRecentNoteSuggestions(limit = 10, onlyGenba = false) {
+    const logs = loadLogs();
+    const sorted = [...logs].sort((a, b) => new Date(b.startISO) - new Date(a.startISO));
+
+    const seen = new Set();
+    const result = [];
+
+    for (const log of sorted) {
+      if (onlyGenba && log.category !== "現場") continue;
+
+      const note = String(log.note || "").trim();
+      if (!note) continue;
+
+      if (!seen.has(note)) {
+        seen.add(note);
+        result.push(note);
+        if (result.length >= limit) break;
+      }
+    }
+    return result;
+  }
+
+  function renderNoteSuggestions({ onlyGenba = false } = {}) {
+    const notes = buildRecentNoteSuggestions(10, onlyGenba);
+    noteSuggestions.innerHTML = "";
+    for (const n of notes) {
+      const opt = document.createElement("option");
+      opt.value = n;
+      noteSuggestions.appendChild(opt);
+    }
+  }
+
+  // ============================
+  // CSV
+  // ============================
 
   function exportCsvForSelectedDate() {
     const d = toYMD(selectedDate);
@@ -533,7 +568,7 @@ function closeAllRunningLogs() {
     const userName = safeUserName(getUserName());
     const exportedAtISO = new Date().toISOString();
 
-    const header = ["timestamp", "user", "date", "category", "start", "end", "minutes"];
+    const header = ["timestamp", "user", "date", "category", "start", "end", "minutes", "note"];
     const rows = logs.map((log) => {
       const s = new Date(log.startISO);
       const e = log.endISO ? new Date(log.endISO) : null;
@@ -545,6 +580,7 @@ function closeAllRunningLogs() {
         fmtHM(s),
         e ? fmtHM(e) : "",
         calcMinutes(log.startISO, log.endISO),
+        log.note || "",
       ];
     });
 
@@ -565,7 +601,7 @@ function closeAllRunningLogs() {
     const userName = safeUserName(getUserName());
     const exportedAtISO = new Date().toISOString();
 
-    const header = ["timestamp", "user", "date", "category", "start", "end", "minutes"];
+    const header = ["timestamp", "user", "date", "category", "start", "end", "minutes", "note"];
     const rows = logs.map((log) => {
       const s = new Date(log.startISO);
       const e = log.endISO ? new Date(log.endISO) : null;
@@ -577,6 +613,7 @@ function closeAllRunningLogs() {
         fmtHM(s),
         e ? fmtHM(e) : "",
         calcMinutes(log.startISO, log.endISO),
+        log.note || "",
       ];
     });
 
@@ -598,12 +635,9 @@ function closeAllRunningLogs() {
     URL.revokeObjectURL(url);
   }
 
-  function safeUserName(name) {
-    const cleaned = String(name || "unknown").replace(/[\r\n,]/g, " ").trim() || "unknown";
-    return cleaned.replace(/[\\\/:*?"<>|]/g, "").trim() || "unknown";
-  }
-
-  // ------- ユーティリティ -------
+  // ============================
+  // Util
+  // ============================
 
   function loadLogs() {
     try {
@@ -683,5 +717,19 @@ function closeAllRunningLogs() {
 
   function cryptoRandomId() {
     return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  }
+
+  function safeUserName(name) {
+    const cleaned = String(name || "unknown").replace(/[\r\n,]/g, " ").trim() || "unknown";
+    return cleaned.replace(/[\\\/:*?"<>|]/g, "").trim() || "unknown";
+  }
+
+  function escapeHtml(str) {
+    return String(str ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
   }
 });
